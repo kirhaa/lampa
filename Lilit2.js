@@ -67,6 +67,13 @@
             en: 'Open in embedded player (iframe)'
         },
         trout_diag: { ru: 'Диагностика', uk: 'Діагностика', en: 'Diagnostics' },
+        trout_mode: { ru: 'Плеер', uk: 'Плеєр', en: 'Player' },
+        trout_mode_lampa: { ru: 'Плеер Lampa', uk: 'Плеєр Lampa', en: 'Lampa player' },
+        trout_mode_iframe: { ru: 'Встроенный (iframe)', uk: 'Вбудований (iframe)', en: 'Embedded (iframe)' },
+        trout_link: { ru: 'Показать ссылку на поток', uk: 'Показати посилання на потік', en: 'Show stream link' },
+        trout_copy: { ru: 'Скопировать ссылку на поток', uk: 'Скопіювати посилання на потік', en: 'Copy stream link' },
+        trout_copied: { ru: 'Ссылка скопирована', uk: 'Посилання скопійовано', en: 'Link copied' },
+        trout_copy_fail: { ru: 'Не удалось скопировать', uk: 'Не вдалося скопіювати', en: 'Copy failed' },
         trout_stream_failed: {
             ru: 'Прямой поток не найден, открываю встроенный плеер',
             uk: 'Прямий потік не знайдено, відкриваю вбудований плеєр',
@@ -638,13 +645,16 @@
     }
 
     function showDiag(diag) {
-        var text = diagText(diag);
+        showText(tr('trout_diag'), diagText(diag));
+    }
+
+    function showText(title, text) {
         var html = $('<div class="trout-diag"></div>').text(text);
         var enabled = Lampa.Controller.enabled();
         var prev = (enabled && enabled.name) || 'content';
 
         Lampa.Modal.open({
-            title: tr('trout_diag'),
+            title: title,
             html: html,
             size: 'large',
             onBack: function () {
@@ -668,7 +678,7 @@
         var playToken = 0;
         var filter_items = { balanser: [], voice: [], quality: [], season: [] };
         // voice и quality: '' = по умолчанию / «Все»
-        var choice = { balanser: 0, voice: '', quality: '', season: 0 };
+        var choice = { balanser: 0, voice: '', quality: '', season: 0, mode: 'lampa' };
 
         this.create = function () {
             this.initialize();
@@ -678,6 +688,8 @@
         this.initialize = function () {
             filter.render().find('.filter--sort').remove();
             filter.render().find('.filter--search').addClass('hide');
+
+            choice.mode = Lampa.Storage.get('trout_mode', 'lampa') === 'iframe' ? 'iframe' : 'lampa';
 
             filter.onBack = function () {
                 _this.start();
@@ -701,6 +713,10 @@
                     }
                     if (a.stype === 'season') {
                         choice.season = b.index;
+                    }
+                    if (a.stype === 'mode') {
+                        choice.mode = b.index === 0 ? 'lampa' : 'iframe';
+                        Lampa.Storage.set('trout_mode', choice.mode);
                     }
                     _this.draw();
                 }
@@ -962,16 +978,27 @@
 
             if (choice.quality) summary.push(choice.quality);
 
+            groups.push({
+                title: tr('trout_mode'),
+                subtitle: tr(choice.mode === 'iframe' ? 'trout_mode_iframe' : 'trout_mode_lampa'),
+                stype: 'mode',
+                items: [
+                    { title: tr('trout_mode_lampa'), index: 0, selected: choice.mode === 'lampa' },
+                    { title: tr('trout_mode_iframe'), index: 1, selected: choice.mode === 'iframe' }
+                ]
+            });
+
             filter.set('filter', groups);
             filter.chosen('filter', [summary.join(' / ')]);
         };
 
         // ----- отрисовка -----
 
-        this.addItem = function (title, sub, onEnter) {
+        this.addItem = function (title, sub, onEnter, onLong) {
             var item = Lampa.Template.get('trout_item', { title: title, quality: sub });
 
             item.on('hover:enter', onEnter);
+            if (onLong) item.on('hover:long', onLong);
             item.on('hover:focus', function (e) {
                 last = e.target;
                 scroll.update($(e.target), true);
@@ -1030,6 +1057,8 @@
                     if (ep.voices && ep.voices.length) line += ' · ' + ep.voices.slice(0, 3).join(', ');
                     _this.addItem(ep.title, line, function () {
                         _this.playList(list, idx, src);
+                    }, function () {
+                        _this.itemMenu(list, idx, src);
                     });
                 });
             } else {
@@ -1040,6 +1069,8 @@
                 var movieList = [{ label: src.voice, url: d.url, iframe: null, quality: d.quality, subtitles: d.subtitles }];
                 this.addItem(tr('trout_watch'), line, function () {
                     _this.playList(movieList, 0, src);
+                }, function () {
+                    _this.itemMenu(movieList, 0, src);
                 });
             }
         };
@@ -1064,11 +1095,16 @@
             if (Lampa.Loading && typeof Lampa.Loading.stop === 'function') Lampa.Loading.stop();
         };
 
-        this.playList = function (list, index, src) {
+        this.playList = function (list, index, src, forceMode) {
             var el = list[index];
             var movie = object.movie || {};
             var name = movie.title || movie.name || '';
             var base = name ? name + ' / ' : '';
+
+            // режим iframe: открываем страницу плеера целиком, она сама умеет выбирать серии
+            if ((forceMode || choice.mode) === 'iframe') {
+                return openIframe(el.iframe || src.url, base + el.label);
+            }
 
             function toData(e) {
                 var data = { title: base + e.label, url: e.url };
@@ -1119,6 +1155,70 @@
                     openIframe(el.iframe || src.url, base + el.label);
                 }
             });
+        };
+
+        // Меню по долгому нажатию на серию
+        this.itemMenu = function (list, index, src) {
+            var el = list[index];
+            var enabled = Lampa.Controller.enabled();
+            var prev = (enabled && enabled.name) || 'content';
+
+            var menu = [
+                { title: tr('trout_mode_lampa'), action: 'lampa' },
+                { title: tr('trout_mode_iframe'), action: 'iframe' }
+            ];
+            if (el.url) {
+                menu.push({ title: tr('trout_link'), action: 'link' });
+                menu.push({ title: tr('trout_copy'), action: 'copy' });
+            }
+
+            Lampa.Select.show({
+                title: el.label,
+                items: menu,
+                onBack: function () {
+                    Lampa.Controller.toggle(prev);
+                },
+                onSelect: function (a) {
+                    Lampa.Controller.toggle(prev);
+
+                    if (a.action === 'lampa' || a.action === 'iframe') {
+                        _this.playList(list, index, src, a.action);
+                    }
+                    if (a.action === 'link') {
+                        showText(tr('trout_link'), _this.linkText(el, src));
+                    }
+                    if (a.action === 'copy') {
+                        if (Lampa.Utils && typeof Lampa.Utils.copyTextToClipboard === 'function') {
+                            Lampa.Utils.copyTextToClipboard(el.url, function () {
+                                Lampa.Noty.show(tr('trout_copied'));
+                            }, function () {
+                                Lampa.Noty.show(tr('trout_copy_fail'));
+                            });
+                        } else {
+                            showText(tr('trout_link'), _this.linkText(el, src));
+                        }
+                    }
+                }
+            });
+        };
+
+        this.linkText = function (el, src) {
+            var lines = ['Поток: ' + el.url];
+
+            if (el.quality) {
+                Object.keys(el.quality).forEach(function (k) {
+                    lines.push('  ' + k + ': ' + el.quality[k]);
+                });
+            }
+            if (el.subtitles && el.subtitles.length) {
+                el.subtitles.forEach(function (s) {
+                    lines.push('Субтитры (' + s.label + '): ' + s.url);
+                });
+            }
+            lines.push('Страница плеера: ' + src.url);
+            if (el.iframe) lines.push('iframe серии: ' + el.iframe);
+
+            return lines.join('\n');
         };
 
         this.empty = function (msg) {
